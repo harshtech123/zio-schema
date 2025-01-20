@@ -1,8 +1,11 @@
 import sbtcrossproject.CrossPlugin.autoImport._
 import BuildHelper.{ crossProjectSettings, _ }
 import org.scalajs.sbtplugin.ScalaJSPlugin.autoImport._
+import com.typesafe.tools.mima.plugin.MimaKeys.mimaPreviousArtifacts
 
 Global / onChangedBuildSource := ReloadOnSourceChanges
+
+addCompilerPlugin("com.lihaoyi" %% "unroll-plugin" % "0.1.12")
 
 inThisBuild(
   List(
@@ -67,7 +70,8 @@ lazy val root = project
   .in(file("."))
   .settings(
     name := "zio-schema",
-    publish / skip := true
+    publish / skip := true,
+    mimaPreviousArtifacts := Set()
 //    unusedCompileDependenciesFilter -= moduleFilter("org.scala-js", "scalajs-library")
   )
   .aggregate(
@@ -113,7 +117,10 @@ lazy val tests = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .in(file("tests"))
   .dependsOn(zioSchemaDerivation % "compile->test", zioSchema % "test->test", zioSchemaZioTest % "compile->test")
   .settings(stdSettings("zio-schema-tests"))
-  .settings(publish / skip := true)
+  .settings(
+    publish / skip := true,
+    mimaPreviousArtifacts := Set()
+  )
   .settings(crossProjectSettings)
   .settings(buildInfoSettings("zio.schema"))
   .settings(testDeps)
@@ -153,10 +160,11 @@ lazy val zioSchema = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .settings(buildInfoSettings("zio.schema"))
   .settings(
     libraryDependencies ++= Seq(
-      "dev.zio" %%% "zio"                % zioVersion,
-      "dev.zio" %%% "zio-streams"        % zioVersion,
-      "dev.zio" %%% "zio-prelude"        % zioPreludeVersion,
-      "dev.zio" %%% "zio-constraintless" % zioConstraintlessVersion
+      "dev.zio"     %%% "zio"                % zioVersion,
+      "dev.zio"     %%% "zio-streams"        % zioVersion,
+      "dev.zio"     %%% "zio-prelude"        % zioPreludeVersion,
+      "dev.zio"     %%% "zio-constraintless" % zioConstraintlessVersion,
+      "com.lihaoyi" %% "unroll-annotation"   % "0.1.12"
     )
   )
   .nativeSettings(Test / fork := false)
@@ -387,6 +395,7 @@ lazy val zioSchemaExamples = crossProject(JSPlatform, JVMPlatform, NativePlatfor
   .dependsOn(zioSchema, zioSchemaJson, zioSchemaProtobuf, zioSchemaOptics)
   .settings(
     publish / skip := true,
+    mimaPreviousArtifacts := Set(),
     moduleName := "zio-schema-example",
     scalacOptions -= "-Yno-imports",
     scalacOptions -= "-Xfatal-warnings"

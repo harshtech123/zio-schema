@@ -5,7 +5,7 @@ import java.nio.charset.StandardCharsets
 import java.util
 import java.util.concurrent.ConcurrentHashMap
 
-import scala.annotation.switch
+import scala.annotation._
 import scala.collection.immutable.ListMap
 import scala.collection.mutable
 import scala.util.control.NonFatal
@@ -33,7 +33,7 @@ object JsonCodec {
 
   final case class Config(
     ignoreEmptyCollections: Boolean,
-    treatStreamsAsArrays: Boolean = false,
+    @unroll treatStreamsAsArrays: Boolean = false,
     explicitNulls: Boolean = false
   )
 
@@ -570,7 +570,7 @@ object JsonCodec {
         out.write("{}")
       } else {
         val encoders = nonTransientFields.map(field => schemaEncoder(field.schema.asInstanceOf[Schema[Any]], cfg))
-        (value: ListMap[String, _], indent: Option[Int], out: Write) => {
+        (a: ListMap[String, _], indent: Option[Int], out: Write) => {
           out.write('{')
           val doPrettyPrint = indent ne None
           var indent_       = indent
@@ -590,21 +590,22 @@ object JsonCodec {
           }
           var idx = 0
           while (idx < nonTransientFields.length) {
-            val field      = nonTransientFields(idx)
-            val fieldName  = field.fieldName
-            val fieldValue = value(fieldName)
-            if (!isEmptyOptionalValue(field, fieldValue, cfg)) {
+            val field   = nonTransientFields(idx)
+            val encoder = encoders(idx)
+            idx += 1
+            val name  = field.fieldName
+            val value = a(name)
+            if (!isEmptyOptionalValue(field, value, cfg) && (!encoder.isNothing(value) || cfg.explicitNulls)) {
               if (first) first = false
               else {
                 out.write(',')
                 if (doPrettyPrint) pad(indent_, out)
               }
-              strEnc.unsafeEncode(fieldName, indent_, out)
+              strEnc.unsafeEncode(name, indent_, out)
               if (doPrettyPrint) out.write(" : ")
               else out.write(':')
-              encoders(idx).unsafeEncode(fieldValue, indent_, out)
+              encoder.unsafeEncode(value, indent_, out)
             }
-            idx += 1
           }
           if (doPrettyPrint) pad(indent, out)
           out.write('}')
@@ -837,7 +838,7 @@ object JsonCodec {
         discriminator match {
           case None =>
             if (caseNameAliases.size <= 64) {
-              val stringMatrix = new StringMatrix(caseNameAliases.keys.toArray)
+              val caseMatrix = new StringMatrix(caseNameAliases.keys.toArray)
               val cases = caseNameAliases.values.map { case_ =>
                 (JsonError.ObjectAccess(case_.caseName), schemaDecoder(case_.schema))
               }.toArray
@@ -845,7 +846,7 @@ object JsonCodec {
                 val lexer = Lexer
                 lexer.char(trace, in, '{')
                 if (!lexer.firstField(trace, in)) error("missing subtype", trace)
-                val idx = lexer.field(trace, in, stringMatrix)
+                val idx = lexer.field(trace, in, caseMatrix)
                 if (idx < 0) error("unrecognized subtype", trace)
                 val spanWithDecoder = cases(idx)
                 val trace_          = spanWithDecoder._1 :: trace
@@ -874,11 +875,11 @@ object JsonCodec {
                 decoded
               }
             }
-          case Some(discriminatorName) =>
+          case Some(discrName) =>
+            val discriminatorMatrix = new StringMatrix(Array(discrName))
+            val discriminatorSpan   = JsonError.ObjectAccess(discrName)
             if (caseNameAliases.size <= 64) {
-              val discriminatorMatrix = new StringMatrix(Array(discriminatorName))
-              val discriminatorSpan   = JsonError.ObjectAccess(discriminatorName)
-              val caseMatrix          = new StringMatrix(caseNameAliases.keys.toArray)
+              val caseMatrix = new StringMatrix(caseNameAliases.keys.toArray)
               val cases = caseNameAliases.values.map { case_ =>
                 (JsonError.ObjectAccess(case_.caseName), schemaDecoder(case_.schema, discriminator))
               }.toArray
@@ -901,7 +902,6 @@ object JsonCodec {
                 spanWithDecoder._2.unsafeDecode(spanWithDecoder._1 :: trace_, rr).asInstanceOf[Z]
               }
             } else {
-              val discriminatorSpan = JsonError.ObjectAccess(discriminatorName)
               val cases =
                 new util.HashMap[String, (JsonError.ObjectAccess, ZJsonDecoder[Any])](caseNameAliases.size << 1)
               caseNameAliases.foreach {
@@ -914,14 +914,12 @@ object JsonCodec {
                 if (!lexer.firstField(trace, in)) error("missing subtype", trace)
                 val rr = RecordingReader(in)
                 while ({
-                  (lexer.string(trace, rr).toString != discriminatorName) && {
-                    lexer.char(trace, rr, ':')
+                  (lexer.field(trace, rr, discriminatorMatrix) < 0) && {
                     lexer.skipValue(trace, rr)
                     lexer.nextField(trace, rr) || error("missing subtype", trace)
                   }
                 }) ()
-                val trace_ = discriminatorSpan :: trace
-                lexer.char(trace_, rr, ':')
+                val trace_     = discriminatorSpan :: trace
                 val fieldValue = lexer.string(trace_, rr).toString
                 rr.rewind()
                 val spanWithDecoder = cases.get(fieldValue)
@@ -1098,8 +1096,8 @@ object JsonCodec {
       })
 
     private[codec] def caseClassEncoder[Z](schema: Schema.Record[Z], cfg: Config, discriminatorTuple: DiscriminatorTuple): ZJsonEncoder[Z] = {
-      val nonTransientFields = schema.nonTransientFields.map(_.asInstanceOf[Schema.Field[Z, Any]]).toArray
-      val fieldEncoders      = nonTransientFields.map(s => JsonEncoder.schemaEncoder(s.schema, cfg, discriminatorTuple))
+      val nonTransientFields = schema.nonTransientFields.toArray.asInstanceOf[Array[Schema.Field[Z, Any]]]
+      val encoders           = nonTransientFields.map(s => JsonEncoder.schemaEncoder(s.schema, cfg, discriminatorTuple))
       (a: Z, indent: Option[Int], out: Write) => {
         out.write('{')
         val doPrettyPrint = indent ne None
@@ -1120,20 +1118,20 @@ object JsonCodec {
         }
         var idx = 0
         while (idx < nonTransientFields.length) {
-          val schema = nonTransientFields(idx)
-          val enc    = fieldEncoders(idx)
+          val field   = nonTransientFields(idx)
+          val encoder = encoders(idx)
           idx += 1
-          val value = schema.get(a)
-          if (!isEmptyOptionalValue(schema, value, cfg) && (!enc.isNothing(value) || cfg.explicitNulls)) {
+          val value = field.get(a)
+          if (!isEmptyOptionalValue(field, value, cfg) && (!encoder.isNothing(value) || cfg.explicitNulls)) {
             if (first) first = false
             else {
               out.write(',')
               if (doPrettyPrint) pad(indent_, out)
             }
-            strEnc.unsafeEncode(schema.fieldName, indent_, out)
+            strEnc.unsafeEncode(field.fieldName, indent_, out)
             if (doPrettyPrint) out.write(" : ")
             else out.write(':')
-            enc.unsafeEncode(value, indent_, out)
+            encoder.unsafeEncode(value, indent_, out)
           }
         }
         if (doPrettyPrint) pad(indent, out)
@@ -1537,7 +1535,7 @@ object JsonCodec {
         override def get(key: String): Option[Any] = ???
 
         override def iterator: Iterator[(String, Any)] = new Iterator[(String, Any)] {
-          private[this] val names   = stringMatrix.xs // can contain a discriminator field name at the last position
+          private[this] val keys    = spans
           private[this] val values  = buffer
           private[this] var nextIdx = 0
 
@@ -1547,7 +1545,7 @@ object JsonCodec {
           def next(): (String, Any) = {
             val idx = nextIdx
             nextIdx += 1
-            (names(idx), values(idx))
+            (keys(idx).field, values(idx))
           }
         }
       }).result()
