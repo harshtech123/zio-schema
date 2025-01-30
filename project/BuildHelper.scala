@@ -34,7 +34,7 @@ object BuildHelper {
   val Scala3: String   = versions("3.3")
 
   val zioVersion                   = "2.1.14"
-  val zioJsonVersion               = "0.7.4"
+  val zioJsonVersion               = "0.7.9"
   val zioPreludeVersion            = "1.0.0-RC37"
   val zioOpticsVersion             = "0.2.2"
   val zioBsonVersion               = "1.0.6"
@@ -220,6 +220,7 @@ object BuildHelper {
       ThisBuild / scalaVersion := Scala213, //crossScalaVersions.value.head, //Scala3,
       scalacOptions ++= compilerOptions(scalaVersion.value, optimize = !isSnapshot.value),
       libraryDependencies ++= compileOnlyDeps(scalaVersion.value),
+      versionScheme := Some("early-semver"),
       ThisBuild / semanticdbEnabled := scalaVersion.value != Scala3, // enable SemanticDB,
       ThisBuild / semanticdbOptions += "-P:semanticdb:synthetics:on",
       ThisBuild / semanticdbVersion := scalafixSemanticdb.revision,
@@ -230,9 +231,19 @@ object BuildHelper {
       incOptions ~= (_.withLogRecompileOnMacro(true)),
       autoAPIMappings := true,
       testFrameworks := Seq(new TestFramework("zio.test.sbt.ZTestFramework")),
-      mimaPreviousArtifacts := previousStableVersion.value.map(organization.value %% name.value % _).toSet,
+      mimaPreviousArtifacts := previousStableVersion.value
+        .filter(_ != "1.5.0")
+        .map(organization.value %% name.value % _)
+        .toSet ++ Set(
+        organization.value %% name.value % "1.4.1"
+      ),
       mimaCheckDirection := "backward", // TODO use "both" for patch versions
       mimaBinaryIssueFilters ++= Seq(
+        exclude[Problem]("zio.schema.Schema#Collection.fromChunk"),
+        exclude[Problem]("zio.schema.Schema#Collection.toChunk"),
+        exclude[Problem]("zio.schema.Schema#Collection.empty"),
+        exclude[Problem]("zio.schema.Schema#NonEmptyMap.fromChunk"),
+        exclude[Problem]("zio.schema.Schema#NonEmptyMap.toChunk"),
         exclude[Problem]("zio.schema.codec.JsonCodec#JsonDecoder.x"),
         exclude[Problem]("zio.schema.SchemaPlatformSpecific.*"),
         exclude[Problem]("zio.schema.Schema.url")
