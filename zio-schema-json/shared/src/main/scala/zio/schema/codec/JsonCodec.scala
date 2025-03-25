@@ -369,11 +369,11 @@ object JsonCodec {
         case Schema.Fail(_, _)                           => unitEncoder.contramap(_ => ())
         case Schema.Either(left, right, _)               => ZJsonEncoder.either(schemaEncoder(left, cfg), schemaEncoder(right, cfg))
         case Schema.Fallback(left, right, _, _)          => fallbackEncoder(schemaEncoder(left, cfg), schemaEncoder(right, cfg))
-        case l @ Schema.Lazy(_)                          => ZJsonEncoder.suspend(schemaEncoder(l.schema, cfg))
+        case s: Schema.Lazy[A]                           => ZJsonEncoder.suspend(schemaEncoder(s.schema, cfg, discriminatorTuple))
         case s: Schema.GenericRecord                     => recordEncoder(s, cfg, discriminatorTuple)
         case s: Schema.Record[A]                         => caseClassEncoder(s, cfg, discriminatorTuple)
         case s: Schema.Enum[A]                           => enumEncoder(s, cfg)
-        case d @ Schema.Dynamic(_)                       => dynamicEncoder(d, cfg)
+        case s: Schema.Dynamic                           => dynamicEncoder(s, cfg)
         case null =>
           throw new Exception(s"A captured schema is null, most likely due to wrong field initialization order")
       }
@@ -522,43 +522,66 @@ object JsonCodec {
             .toMap
         ZJsonEncoder.string.contramap(caseMap(_))
       } else {
-        new ZJsonEncoder[Z] {
-          private[this] val discriminatorName =
-            if (schema.noDiscriminator) None
-            else schema.annotations.collectFirst { case d: discriminatorName => d.tag }
-          private[this] val cases = schema.nonTransientCases.toArray
-          private[this] val decoders = cases.map { case_ =>
-            val discriminatorTuple =
-              if (discriminatorName eq None) None
-              else Some((discriminatorName.get, case_.caseName))
-            schemaEncoder(case_.schema.asInstanceOf[Schema[Any]], cfg, discriminatorTuple)
-          }
-          private[this] val doJsonObjectWrapping = discriminatorName.isEmpty && !schema.noDiscriminator
+        val discriminatorName =
+          if (schema.noDiscriminator) None
+          else schema.annotations.collectFirst { case d: discriminatorName => d.tag }
+        val doJsonObjectWrapping = discriminatorName.isEmpty && !schema.noDiscriminator
+        if (doJsonObjectWrapping) {
+          new ZJsonEncoder[Z] {
+            private[this] val cases = schema.nonTransientCases.toArray
+            private[this] val decoders =
+              cases.map(case_ => schemaEncoder(case_.schema.asInstanceOf[Schema[Any]], cfg, None))
+            private[this] val encodedKeys =
+              cases.map(case_ => ZJsonEncoder.string.encodeJson(case_.caseName).toString + ':')
+            private[this] val prettyEncodedKeys =
+              cases.map(case_ => ZJsonEncoder.string.encodeJson(case_.caseName).toString + " : ")
 
-          override def unsafeEncode(a: Z, indent: Option[Int], out: Write): Unit = {
-            var idx = 0
-            while (idx < cases.length) {
-              val case_ = cases(idx)
-              if (case_.isCase(a)) {
-                var indent_ = indent
-                if (doJsonObjectWrapping) {
+            override def unsafeEncode(a: Z, indent: Option[Int], out: Write): Unit = {
+              var idx = 0
+              while (idx < cases.length) {
+                val case_ = cases(idx)
+                if (case_.isCase(a)) {
+                  var indent_ = indent
                   out.write('{')
                   indent_ = bump(indent)
                   pad(indent_, out)
-                  ZJsonEncoder.string.unsafeEncode(case_.caseName, indent_, out)
-                  if (indent.isEmpty) out.write(':')
-                  else out.write(" : ")
-                }
-                decoders(idx).unsafeEncode(case_.deconstruct(a), indent_, out)
-                if (doJsonObjectWrapping) {
+                  out.write(if (indent_ eq None) encodedKeys(idx) else prettyEncodedKeys(idx))
+                  decoders(idx).unsafeEncode(case_.deconstruct(a), indent_, out)
                   pad(indent, out)
                   out.write('}')
+                  return
                 }
-                return
+                idx += 1
               }
-              idx += 1
+              out.write("{}") // for transient cases
             }
-            out.write("{}") // for transient cases
+          }
+        } else {
+          new ZJsonEncoder[Z] {
+            private[this] val cases = schema.nonTransientCases.toArray
+            private[this] val decoders = cases.map { case_ =>
+              val discriminatorTuple =
+                if (discriminatorName eq None) None
+                else {
+                  val key   = ZJsonEncoder.string.encodeJson(discriminatorName.get, None).toString
+                  val value = ZJsonEncoder.string.encodeJson(case_.caseName, None).toString
+                  Some((key + ':' + value, key + " : " + value))
+                }
+              schemaEncoder(case_.schema.asInstanceOf[Schema[Any]], cfg, discriminatorTuple)
+            }
+
+            override def unsafeEncode(a: Z, indent: Option[Int], out: Write): Unit = {
+              var idx = 0
+              while (idx < cases.length) {
+                val case_ = cases(idx)
+                if (case_.isCase(a)) {
+                  decoders(idx).unsafeEncode(case_.deconstruct(a), indent, out)
+                  return
+                }
+                idx += 1
+              }
+              out.write("{}") // for transient cases
+            }
           }
         }
       }
@@ -572,17 +595,13 @@ object JsonCodec {
             case Fallback.Right(b) => right.unsafeEncode(b, indent, out)
             case Fallback.Both(a, b) =>
               out.write('[')
-              val doPrettyPrint = indent ne None
-              var indent_       = indent
-              if (doPrettyPrint) {
-                indent_ = bump(indent)
-                pad(indent_, out)
-              }
+              val indent_ = bump(indent)
+              pad(indent_, out)
               left.unsafeEncode(a, indent_, out)
               out.write(',')
-              if (doPrettyPrint) pad(indent_, out)
+              pad(indent_, out)
               right.unsafeEncode(b, indent_, out)
-              if (doPrettyPrint) pad(indent, out)
+              pad(indent, out)
               out.write(']')
           }
       }
@@ -597,44 +616,36 @@ object JsonCodec {
         out.write("{}")
       } else {
         val encoders = nonTransientFields.map(field => schemaEncoder(field.schema.asInstanceOf[Schema[Any]], cfg))
+        val encodedNames =
+          nonTransientFields.map(field => ZJsonEncoder.string.encodeJson(field.fieldName, None).toString + ':')
+        val prettyEncodedNames =
+          nonTransientFields.map(field => ZJsonEncoder.string.encodeJson(field.fieldName, None).toString + " : ")
         (a: ListMap[String, _], indent: Option[Int], out: Write) => {
           out.write('{')
-          val doPrettyPrint = indent ne None
-          var indent_       = indent
-          if (doPrettyPrint) {
-            indent_ = bump(indent)
-            pad(indent_, out)
-          }
-          val strEnc = ZJsonEncoder.string
-          var first  = true
+          val indent_ = bump(indent)
+          var comma   = false
           if (discriminatorTuple ne None) {
+            comma = true
             val tuple = discriminatorTuple.get
-            first = false
-            strEnc.unsafeEncode(tuple._1, indent_, out)
-            if (doPrettyPrint) out.write(" : ")
-            else out.write(':')
-            strEnc.unsafeEncode(tuple._2, indent_, out)
+            pad(indent_, out)
+            out.write(if (indent_ eq None) tuple._1 else tuple._2)
           }
           var idx = 0
           while (idx < nonTransientFields.length) {
             val field   = nonTransientFields(idx)
             val encoder = encoders(idx)
-            idx += 1
-            val name  = field.fieldName
-            val value = a(name)
+            val name    = field.fieldName
+            val value   = a(name)
             if (!isEmptyOptionalValue(field, value, cfg) && (!encoder.isNothing(value) || cfg.explicitNulls)) {
-              if (first) first = false
-              else {
-                out.write(',')
-                if (doPrettyPrint) pad(indent_, out)
-              }
-              strEnc.unsafeEncode(name, indent_, out)
-              if (doPrettyPrint) out.write(" : ")
-              else out.write(':')
+              if (comma) out.write(',')
+              else comma = true
+              pad(indent_, out)
+              out.write(if (indent_ eq None) encodedNames(idx) else prettyEncodedNames(idx))
               encoder.unsafeEncode(value, indent_, out)
             }
+            idx += 1
           }
-          if (doPrettyPrint) pad(indent, out)
+          pad(indent, out)
           out.write('}')
         }
       }
@@ -712,7 +723,7 @@ object JsonCodec {
       case Schema.Fail(message, _)                        => failDecoder(message)
       case Schema.Either(left, right, _)                  => ZJsonDecoder.either(schemaDecoder(left), schemaDecoder(right))
       case s @ Schema.Fallback(_, _, _, _)                => fallbackDecoder(s)
-      case l @ Schema.Lazy(_)                             => ZJsonDecoder.suspend(schemaDecoder(l.schema))
+      case s: Schema.Lazy[A]                              => ZJsonDecoder.suspend(schemaDecoder(s.schema, discriminator))
       case s: Schema.GenericRecord                        => recordDecoder(s, discriminator)
       case s: Schema.Enum[A]                              => enumDecoder(s)
       //case Schema.Meta(_, _)                                                                           => astDecoder
@@ -753,8 +764,8 @@ object JsonCodec {
         caseClass21Decoder(discriminator, s)
       case s @ Schema.CaseClass22(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _) =>
         caseClass22Decoder(discriminator, s)
-      case d @ Schema.Dynamic(_) => dynamicDecoder(d)
-      case _                     => throw new Exception(s"Missing a handler for decoding of schema ${schema.toString()}.")
+      case s: Schema.Dynamic => dynamicDecoder(s)
+      case _                 => throw new Exception(s"Missing a handler for decoding of schema ${schema.toString()}.")
     }
     //scalafmt: { maxColumn = 120, optIn.configStyleArguments = true }
 
@@ -1117,51 +1128,43 @@ object JsonCodec {
 
     private[codec] def isEmptyOptionalValue(schema: Schema.Field[_, _], value: Any, cfg: Config) =
       (cfg.ignoreEmptyCollections || schema.optional) && (value match {
-        case None           => true
-        case _: Iterable[_] => value.asInstanceOf[Iterable[_]].isEmpty
-        case _              => false
+        case None            => true
+        case it: Iterable[_] => it.isEmpty
+        case _               => false
       })
 
     private[codec] def caseClassEncoder[Z](schema: Schema.Record[Z], cfg: Config, discriminatorTuple: DiscriminatorTuple): ZJsonEncoder[Z] = {
       val nonTransientFields = schema.nonTransientFields.toArray.asInstanceOf[Array[Schema.Field[Z, Any]]]
-      val encoders           = nonTransientFields.map(s => JsonEncoder.schemaEncoder(s.schema, cfg, discriminatorTuple))
+      val encoders           = nonTransientFields.map(s => JsonEncoder.schemaEncoder(s.schema, cfg))
+      val encodedNames =
+        nonTransientFields.map(field => ZJsonEncoder.string.encodeJson(field.fieldName, None).toString + ':')
+      val prettyEncodedNames =
+        nonTransientFields.map(field => ZJsonEncoder.string.encodeJson(field.fieldName, None).toString + " : ")
       (a: Z, indent: Option[Int], out: Write) => {
         out.write('{')
-        val doPrettyPrint = indent ne None
-        var indent_       = indent
-        if (doPrettyPrint) {
-          indent_ = bump(indent)
-          pad(indent_, out)
-        }
-        val strEnc = ZJsonEncoder.string
-        var first  = true
+        val indent_ = bump(indent)
+        var comma   = false
         if (discriminatorTuple ne None) {
+          comma = true
+          pad(indent_, out)
           val tuple = discriminatorTuple.get
-          first = false
-          strEnc.unsafeEncode(tuple._1, indent_, out)
-          if (doPrettyPrint) out.write(" : ")
-          else out.write(':')
-          strEnc.unsafeEncode(tuple._2, indent_, out)
+          out.write(if (indent_ eq None) tuple._1 else tuple._2)
         }
         var idx = 0
         while (idx < nonTransientFields.length) {
           val field   = nonTransientFields(idx)
           val encoder = encoders(idx)
-          idx += 1
-          val value = field.get(a)
+          val value   = field.get(a)
           if (!isEmptyOptionalValue(field, value, cfg) && (!encoder.isNothing(value) || cfg.explicitNulls)) {
-            if (first) first = false
-            else {
-              out.write(',')
-              if (doPrettyPrint) pad(indent_, out)
-            }
-            strEnc.unsafeEncode(field.fieldName, indent_, out)
-            if (doPrettyPrint) out.write(" : ")
-            else out.write(':')
+            if (comma) out.write(',')
+            else comma = true
+            pad(indent_, out)
+            out.write(if (indent_ eq None) encodedNames(idx) else prettyEncodedNames(idx))
             encoder.unsafeEncode(value, indent_, out)
           }
+          idx += 1
         }
-        if (doPrettyPrint) pad(indent, out)
+        pad(indent, out)
         out.write('}')
       }
     }
