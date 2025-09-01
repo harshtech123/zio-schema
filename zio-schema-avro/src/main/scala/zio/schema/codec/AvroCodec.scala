@@ -22,7 +22,7 @@ import org.apache.avro.{ Conversions, LogicalTypes, Schema => SchemaAvro }
 import zio.prelude.NonEmptyMap
 import zio.schema.{ Fallback, FieldSet, Schema, StandardType, TypeId }
 import zio.stream.ZPipeline
-import zio.{ Chunk, Unsafe, ZIO }
+import zio.{ Chunk, Unsafe }
 
 object AvroCodec {
 
@@ -49,9 +49,8 @@ object AvroCodec {
         encoded
       }
 
-      override def streamEncoder: ZPipeline[Any, Nothing, A, Byte] = ZPipeline.mapChunks { chunk =>
-        chunk.flatMap(encode)
-      }
+      override def streamEncoder: ZPipeline[Any, Nothing, A, Byte] =
+        ZPipeline.mapChunks(_.flatMap(encode))
 
       override def decode(whole: Chunk[Byte]): Either[DecodeError, A] = {
         val datumReader = new GenericDatumReader[Any](avroSchema)
@@ -60,11 +59,8 @@ object AvroCodec {
         decodeValue(decoded, schema)
       }
 
-      override def streamDecoder: ZPipeline[Any, DecodeError, Byte, A] = ZPipeline.mapChunksZIO { chunk =>
-        ZIO.fromEither(
-          decode(chunk).map(Chunk(_))
-        )
-      }
+      override def streamDecoder: ZPipeline[Any, DecodeError, Byte, A] =
+        ZPipeline.mapChunksEither(bytes => decode(bytes).map(Chunk.single))
 
       override def encodeGenericRecord(value: A)(implicit schema: Schema[A]): GenericData.Record =
         encodeValue(value, schema).asInstanceOf[GenericData.Record]
@@ -231,7 +227,13 @@ object AvroCodec {
   }
 
   private def decodeCaseClass1[A, Z](raw: Any, schema: Schema.CaseClass1[A, Z]) =
-    decodeValue(raw, schema.field.schema).map(schema.defaultConstruct)
+    raw match {
+      case record: GenericRecord =>
+        val fieldValue = record.get(schema.field.name)
+        decodeValue(fieldValue, schema.field.schema).map(schema.defaultConstruct)
+      case other =>
+        decodeValue(other, schema.field.schema).map(schema.defaultConstruct)
+    }
 
   private def decodeEnum[Z](raw: Any, cases: Schema.Case[Z, _]*): Either[DecodeError, Any] =
     raw match {
@@ -465,21 +467,18 @@ object AvroCodec {
     combined.map(_.toMap)
 
   }
-  private def decodeSequence[A](a: A, schema: Schema[A]) = {
-    val array  = a.asInstanceOf[GenericData.Array[Any]]
-    val result = array.asScala.toList.map(decodeValue(_, schema))
-    val traversed: Either[List[DecodeError], List[A]] = result.partition(_.isLeft) match {
-      case (Nil, decoded) => Right(for (Right(i) <- decoded) yield i)
-      case (errors, _)    => Left(for (Left(s)   <- errors) yield s)
-    }
-    val combined: Either[DecodeError, List[A]] = traversed.left.map { errors =>
-      errors.foldLeft[DecodeError](DecodeError.MalformedFieldWithPath(Chunk.empty, "Sequence decoding failed."))(
-        (acc, error) => acc.and(DecodeError.MalformedFieldWithPath(Chunk.empty, s"${error.message}"))
-      )
-    }
 
-    combined.map(Chunk.fromIterable(_))
-  }
+  private def decodeSequence[A](a: A, schema: Schema[A]) =
+    (a.asInstanceOf[GenericData.AbstractArray[Any]].asScala.map(decodeValue(_, schema)).partition(_.isLeft) match {
+      case (errors, decoded) if errors.isEmpty => Right(for (Right(i) <- decoded) yield i)
+      case (errors, _) =>
+        Left {
+          (for (Left(s) <- errors) yield s)
+            .foldLeft[DecodeError](DecodeError.MalformedFieldWithPath(Chunk.empty, "Sequence decoding failed."))(
+              (acc, error) => acc.and(DecodeError.MalformedFieldWithPath(Chunk.empty, s"${error.message}"))
+            )
+        }
+    }).map(Chunk.fromIterable(_))
 
   private def decodeTuple2[A, B](value: Any, schemaLeft: Schema[A], schemaRight: Schema[B]) = {
     val record  = value.asInstanceOf[GenericRecord]

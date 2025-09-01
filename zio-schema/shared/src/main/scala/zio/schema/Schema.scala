@@ -166,7 +166,7 @@ sealed trait Schema[A] {
   def zip[B](that: Schema[B]): Schema[(A, B)] = Schema.Tuple2(self, that)
 }
 
-object Schema extends SchemaPlatformSpecific with SchemaEquality {
+object Schema extends SchemaPlatformSpecific with SchemaEquality with SchemaVersionSpecific {
   def apply[A](implicit schema: Schema[A]): Schema[A] = schema
 
   def defer[A](schema: => Schema[A]): Schema[A] = Lazy(() => schema)
@@ -403,6 +403,9 @@ object Schema extends SchemaPlatformSpecific with SchemaEquality {
 
     def caseOf(z: Z): Option[Case[Z, _]] = cases.find(_.isCase(z))
 
+    val discriminatorName: Option[String] =
+      annotations.collectFirst { case d: discriminatorName => d.tag }
+
     val noDiscriminator: Boolean =
       annotations.exists(_.isInstanceOf[noDiscriminator])
 
@@ -437,13 +440,17 @@ object Schema extends SchemaPlatformSpecific with SchemaEquality {
       case f: fieldName => f.name
     }.getOrElse(name)
 
-    val nameAndAliases: scala.collection.immutable.Set[String] =
-      annotations.foldLeft(scala.collection.immutable.Set(fieldName)) { (acc, annotation) =>
+    val aliases: scala.collection.immutable.Set[String] = {
+      annotations.foldLeft(scala.collection.immutable.Set.empty[String]) { (acc, annotation) =>
         annotation match {
           case aliases: fieldNameAliases => acc ++ aliases.aliases
           case _                         => acc
         }
       }
+    }
+
+    val nameAndAliases: scala.collection.immutable.Set[String] =
+      aliases + fieldName
 
     override def toString: String = s"Field($name,$schema)"
   }
@@ -489,6 +496,9 @@ object Schema extends SchemaPlatformSpecific with SchemaEquality {
 
     lazy val nonTransientFields: Chunk[Field[R, _]] =
       fields.filterNot(_.transient)
+
+    val rejectExtraFields: Boolean =
+      annotations.exists(_.isInstanceOf[rejectExtraFields])
 
     def construct(fieldValues: Chunk[Any])(implicit unsafe: Unsafe): scala.util.Either[String, R]
 
