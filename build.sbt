@@ -492,9 +492,9 @@ lazy val testDeps = Seq(
   libraryDependencies ++= Seq(
     "dev.zio" %%% "zio-test"     % zioVersion % Test,
     "dev.zio" %%% "zio-test-sbt" % zioVersion % Test,
-    "dev.zio" %% "zio" % "1.0.0",
-    "dev.zio" %% "zio-test" % "1.0.0" % Test,
-    "dev.zio" %% "zio-test-sbt" % "1.0.0" % Test
+    "dev.zio" %% "zio"           % "1.0.18",
+    "dev.zio" %% "zio-test"      % "1.0.18" % Test,
+    "dev.zio" %% "zio-test-sbt"  % "1.0.18" % Test
   )
 )
 
@@ -505,8 +505,8 @@ lazy val `zio-schema-xml` = project
     version := "0.1.0",
     scalaVersion := "2.13.6",
     libraryDependencies ++= Seq(
-      "dev.zio" %% "zio-schema" % "1.0.0",
-      "org.scala-lang.modules" %% "scala-xml" % "2.0.1"
+      "dev.zio"                %% "zio-schema" % "1.0.0",
+      "org.scala-lang.modules" %% "scala-xml"  % "2.0.1"
     )
   )
 
@@ -518,9 +518,9 @@ lazy val zioSchemaXml = crossProject(JSPlatform, JVMPlatform, NativePlatform)
   .settings(buildInfoSettings("zio.schema.xml"))
   .settings(
     libraryDependencies ++= Seq(
-      "org.scala-lang.modules" %% "scala-xml" % "2.0.1",
-      "dev.zio" %% "zio-test" % zioVersion % Test,
-      "dev.zio" %% "zio-test-sbt" % zioVersion % Test
+      "org.scala-lang.modules" %% "scala-xml"    % "2.0.1",
+      "dev.zio"                %% "zio-test"     % zioVersion % Test,
+      "dev.zio"                %% "zio-test-sbt" % zioVersion % Test
     )
   )
   .nativeSettings(Test / fork := false)
